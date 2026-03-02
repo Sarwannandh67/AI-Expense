@@ -101,6 +101,108 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def detect_dataset_type(df):
+
+    cols = [c.lower() for c in df.columns]
+
+    if "description" in cols and "amount" in cols:
+        return "transaction"
+
+    # Monthly detection:
+    if any(k in c for c in cols for k in ["month", "date", "period"]):
+        if len(cols) > 3:
+            return "monthly"
+
+    return "unknown"
+
+def transform_monthly_dataset(df):
+
+    # Detect first date-like column
+    possible_date_cols = [
+        c for c in df.columns
+        if any(k in c.lower() for k in ["month", "date", "period"])
+    ]
+
+    if not possible_date_cols:
+        raise ValueError("Could not detect date/month column.")
+
+    month_col = possible_date_cols[0]
+
+    df[month_col] = pd.to_datetime(df[month_col], errors="coerce")
+
+    value_cols = df.select_dtypes(include=np.number).columns.tolist()
+
+    melted = df.melt(
+        id_vars=[month_col],
+        value_vars=value_cols,
+        var_name="category",
+        value_name="amount"
+    )
+
+    melted = melted.dropna(subset=["amount"])
+
+    melted.rename(columns={month_col: "date"}, inplace=True)
+    melted["description"] = melted["category"]
+
+    return melted
+
+def auto_map_columns(df):
+
+    # Normalize column names
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    column_map = {}
+
+    # ---- DATE detection ----
+    date_keywords = ["date", "value dt", "transaction date", "period"]
+    for col in df.columns:
+        if any(k in col for k in date_keywords):
+            column_map["date"] = col
+            break
+
+    # ---- DESCRIPTION detection ----
+    desc_keywords = ["description", "narration", "remarks", "details"]
+    for col in df.columns:
+        if any(k in col for k in desc_keywords):
+            column_map["description"] = col
+            break
+
+    # ---- AMOUNT detection ----
+    # Case 1: Single amount column
+    amount_keywords = ["amount", "amt", "transaction amount"]
+    for col in df.columns:
+        if any(k in col for k in amount_keywords):
+            column_map["amount"] = col
+            break
+
+    # Case 2: Separate withdrawal / deposit
+    withdrawal_col = None
+    deposit_col = None
+
+    for col in df.columns:
+        if "withdrawal" in col:
+            withdrawal_col = col
+        if "deposit" in col:
+            deposit_col = col
+
+    if withdrawal_col and deposit_col:
+        df["amount"] = (
+            pd.to_numeric(df[deposit_col], errors="coerce").fillna(0)
+            - pd.to_numeric(df[withdrawal_col], errors="coerce").fillna(0)
+        )
+        column_map["amount"] = "amount"
+
+    # ---- Apply mapping ----
+    if "date" in column_map:
+        df.rename(columns={column_map["date"]: "date"}, inplace=True)
+
+    if "description" in column_map:
+        df.rename(columns={column_map["description"]: "description"}, inplace=True)
+
+    if "amount" in column_map and column_map["amount"] != "amount":
+        df.rename(columns={column_map["amount"]: "amount"}, inplace=True)
+
+    return df
 
 # ─── Data Loading & Caching ──────────────────────────────────────────────────
 @st.cache_data
@@ -111,59 +213,57 @@ def load_and_process_data(uploaded_file, income: float = 75000):
     from modules.clustering import extract_clustering_features, run_clustering, get_dominant_cluster
     from modules.forecaster import prepare_time_series, forecast_with_prophet, compute_financial_health_score
 
-    # ── 1. Load Data ──
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
+        df = auto_map_columns(df)
+        dataset_type = detect_dataset_type(df)
+        if dataset_type == "monthly":
+            df = transform_monthly_dataset(df)
     else:
         df = generate_transactions(monthly_income=income)
 
-    # ── 2. Basic Validation ──
-    required_cols = ['date', 'description', 'amount']
-    missing = [c for c in required_cols if c not in df.columns]
+    if df.empty:
+        raise ValueError("Uploaded file contains no data.")
 
+    required_columns = ["date", "amount", "description"]
+    missing = [c for c in required_columns if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(
+            f"Required columns missing in data: {', '.join(missing)}. "
+            "Please ensure your CSV has date, description, and amount fields."
+        )
 
-    # Convert types safely
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+    df["date"] = pd.to_datetime(df["date"])
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    df = df.dropna(subset=["date", "amount"])
+    df["month"] = df["date"].dt.to_period("M")
 
-    df = df.dropna(subset=['date', 'amount'])
+    base_df = df.copy()
 
-    # ── 3. Module 1: Categorization ──
-    cat_results = build_categorizer(df)
-    df = add_predicted_categories(df, cat_results['model'])
+    cat_results = build_categorizer(base_df)
+    df_with_ai = add_predicted_categories(base_df, cat_results["model"])
 
-    # ── 4. Module 2: Clustering ──
-    feature_df = extract_clustering_features(df, income)
-    cluster_results = run_clustering(feature_df)
-    feature_df['cluster'] = cluster_results['clusters']
-    dominant_profile = get_dominant_cluster(cluster_results)
-
-    # ── 5. Module 3: Anomaly Detection ──
-    df_anomalies, _, _ = detect_anomalies(df)
+    df_anomalies, _, _ = detect_anomalies(df_with_ai)
     anomaly_summary = get_anomaly_summary(df_anomalies)
 
-    # ── 6. Module 4: Forecasting ──
-    monthly_df = prepare_time_series(df, income)
+    monthly_df = prepare_time_series(df_with_ai, monthly_income=income)
     forecast_results = forecast_with_prophet(monthly_df, monthly_income=income)
+    health_score = compute_financial_health_score(df_with_ai, monthly_income=income)
 
-    # ── 7. Financial Health ──
-    health_score = compute_financial_health_score(df, income)
+    feature_df = extract_clustering_features(df_with_ai, monthly_income=income)
+    cluster_results = run_clustering(feature_df)
+    dominant_profile = get_dominant_cluster(cluster_results)
 
     return {
-        'df': df,
-        'df_anomalies': df_anomalies,
-        'cat_results': cat_results,
-        'feature_df': feature_df,
-        'cluster_results': cluster_results,
-        'dominant_profile': dominant_profile,
-        'anomaly_summary': anomaly_summary,
-        'monthly_df': monthly_df,
-        'forecast_results': forecast_results,
-        'health_score': health_score
+        "df": df_with_ai,
+        "df_anomalies": df_anomalies,
+        "monthly_df": monthly_df,
+        "forecast_results": forecast_results,
+        "health_score": health_score,
+        "anomaly_summary": anomaly_summary,
+        "dominant_profile": dominant_profile,
+        "cat_results": cat_results,
     }
-
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -206,8 +306,7 @@ with st.sidebar:
         st.session_state.page = "📋 Transactions"
 
     page = st.session_state.page
-
-# ─── Load Data ───────────────────────────────────────────────────────────────
+# ─── Load Data ───────────────────────────────────────────────
 try:
     with st.spinner("🤖 Running AI models..."):
         data = load_and_process_data(uploaded_file, monthly_income)
