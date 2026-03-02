@@ -103,34 +103,53 @@ st.markdown("""
 
 # ─── Data Loading & Caching ──────────────────────────────────────────────────
 @st.cache_data
-def load_and_process_data(income: float = 75000):
+def load_and_process_data(uploaded_file, income: float = 75000):
     from data.generate_data import generate_transactions
     from modules.categorizer import build_categorizer, add_predicted_categories
     from modules.anomaly_detector import detect_anomalies, get_anomaly_summary
     from modules.clustering import extract_clustering_features, run_clustering, get_dominant_cluster
     from modules.forecaster import prepare_time_series, forecast_with_prophet, compute_financial_health_score
-    
-    df = generate_transactions(monthly_income=income)
-    
-    # Module 1: Categorization
+
+    # ── 1. Load Data ──
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = generate_transactions(monthly_income=income)
+
+    # ── 2. Basic Validation ──
+    required_cols = ['date', 'description', 'amount']
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    # Convert types safely
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+
+    df = df.dropna(subset=['date', 'amount'])
+
+    # ── 3. Module 1: Categorization ──
     cat_results = build_categorizer(df)
     df = add_predicted_categories(df, cat_results['model'])
-    
-    # Module 2: Clustering
+
+    # ── 4. Module 2: Clustering ──
     feature_df = extract_clustering_features(df, income)
     cluster_results = run_clustering(feature_df)
     feature_df['cluster'] = cluster_results['clusters']
     dominant_profile = get_dominant_cluster(cluster_results)
-    
-    # Module 3: Anomaly Detection
+
+    # ── 5. Module 3: Anomaly Detection ──
     df_anomalies, _, _ = detect_anomalies(df)
     anomaly_summary = get_anomaly_summary(df_anomalies)
-    
-    # Module 4: Forecasting
+
+    # ── 6. Module 4: Forecasting ──
     monthly_df = prepare_time_series(df, income)
     forecast_results = forecast_with_prophet(monthly_df, monthly_income=income)
+
+    # ── 7. Financial Health ──
     health_score = compute_financial_health_score(df, income)
-    
+
     return {
         'df': df,
         'df_anomalies': df_anomalies,
@@ -177,8 +196,12 @@ with st.sidebar:
     )
 
 # ─── Load Data ───────────────────────────────────────────────────────────────
-with st.spinner("🤖 Running AI models..."):
-    data = load_and_process_data(monthly_income)
+try:
+    with st.spinner("🤖 Running AI models..."):
+        data = load_and_process_data(uploaded_file, monthly_income)
+except Exception as e:
+    st.error(f"❌ Error processing file: {e}")
+    st.stop()
 
 df = data['df']
 df_anomalies = data['df_anomalies']
@@ -196,10 +219,22 @@ cat_results = data['cat_results']
 if page == "📊 Dashboard":
     st.markdown("# 📊 Expense Dashboard")
     st.markdown(f"*Analyzing {len(df):,} transactions across {df['date'].dt.to_period('M').nunique()} months*")
-    
+
+    st.markdown("### 📋 Data Health Report")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Rows", f"{len(df):,}")
+    with col2:
+        st.metric("Missing Values", f"{df.isnull().sum().sum():,}")
+    with col3:
+        st.metric("Date Range",
+                  f"{df['date'].min().date()} → {df['date'].max().date()}")
+
     # ── KPI Row ──
     total_spent = df['amount'].sum()
-    total_savings = monthly_income * 12 - total_spent
+    n_months = df['date'].dt.to_period('M').nunique()
+    total_savings = monthly_income * n_months - total_spent
     avg_monthly = total_spent / df['date'].dt.to_period('M').nunique()
     n_anomalies = df_anomalies['is_predicted_anomaly'].sum()
     
@@ -211,7 +246,7 @@ if page == "📊 Dashboard":
         st.metric("Total Savings", f"₹{max(0, total_savings)/100000:.2f}L",
                   delta=f"{health['savings_rate']}% rate")
     with col3:
-        st.metric("AI Model Accuracy", f"{cat_results['accuracy']:.1%}",
+        st.metric("NLP Model Accuracy", f"{cat_results['accuracy']:.1%}",
                   delta="NLP Categorizer")
     with col4:
         st.metric("Anomalies Detected", f"{n_anomalies}",
