@@ -156,7 +156,7 @@ health = compute_financial_health_score(df, 75000)
 
 ---
 
-## 🎯 Resume Bullet Points
+## 🎯 Bullet Points
 
 ```
 • Built AI Expense Intelligence System processing 500+ monthly transactions using 
