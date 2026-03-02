@@ -60,6 +60,7 @@ st.markdown("""
         letter-spacing: 0.05em;
     }
     
+    
     .anomaly-card {
         background: rgba(239, 68, 68, 0.1);
         border: 1px solid rgba(239, 68, 68, 0.3);
@@ -189,11 +190,22 @@ with st.sidebar:
     st.markdown("---")
     
     # Navigation
-    page = st.radio(
-        "Navigate",
-        ["📊 Dashboard", "🧠 AI Insights", "🔮 Forecast", "📋 Transactions"],
-        label_visibility="collapsed"
-    )
+    if "page" not in st.session_state:
+        st.session_state.page = "📊 Dashboard"
+
+    if st.button("📊 Dashboard", use_container_width=True):
+        st.session_state.page = "📊 Dashboard"
+
+    if st.button("🧠 AI Insights", use_container_width=True):
+        st.session_state.page = "🧠 AI Insights"
+
+    if st.button("🔮 Forecast", use_container_width=True):
+        st.session_state.page = "🔮 Forecast"
+
+    if st.button("📋 Transactions", use_container_width=True):
+        st.session_state.page = "📋 Transactions"
+
+    page = st.session_state.page
 
 # ─── Load Data ───────────────────────────────────────────────────────────────
 try:
